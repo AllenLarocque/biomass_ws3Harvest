@@ -1,0 +1,16 @@
+Package: biomass_ws3Harvest
+Title: LandR–WS3 Harvest Coupling Module
+Version: 0.1.0
+Authors@R: person("Allen", "Larocque", role = c("aut", "cre"))
+Description: Couples LandR with the WS3 forest estate model: builds a WS3
+    inventory from LandR cohort data, solves the harvest schedule, and applies
+    clearcut disturbance back to cohortData.
+License: GPL-3
+Encoding: UTF-8
+Imports:
+    data.table,
+    terra,
+    reticulate
+Suggests:
+    testthat (>= 3.0.0)
+Config/testthat/edition: 3
