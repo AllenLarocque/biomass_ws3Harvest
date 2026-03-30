@@ -19,6 +19,7 @@ source("../../../biomass_yieldTablesWS3/R/curveCache.R")
 source("../../R/inventoryBridge.R")
 source("../../R/harvestBridge.R")
 source("../../R/actionDispatch.R")
+source("../../R/spatialBridge.R")
 
 # TESTTHAT_WD — absolute path to the project root (4 levels up from tests/testthat/).
 if (nchar(Sys.getenv("TESTTHAT_WD")) == 0L)
