@@ -40,8 +40,8 @@ doEvent.biomass_ws3Harvest <- function(sim, eventTime, eventType) {
   switch(eventType,
     init = {
       # source helper files (harvestBridge before actionDispatch — applyClearcut needed in registry)
-      lapply(c("inventoryBridge.R", "harvestBridge.R", "actionDispatch.R"), function(f)
-        source(file.path(modulePath(sim), currentModule(sim), "R", f)))
+      lapply(c("inventoryBridge.R", "harvestBridge.R", "actionDispatch.R", "spatialBridge.R"),
+             function(f) source(file.path(modulePath(sim), currentModule(sim), "R", f)))
 
       # also source siteQuality from biomass_yieldTablesWS3
       source(file.path(modulePath(sim), "biomass_yieldTablesWS3", "R", "siteQuality.R"))
@@ -91,25 +91,6 @@ _fm.transitions['clearcut'] = {_mask: {'': _tgt}}
 _fm.add_null_action()   # registers 'null' grow-in-place action
 del _fm, _ws3fm_init
 ")
-
-      # ── ForestRaster (spatial harvest allocator) ─────────────────────────────
-      # TODO: initialise ws3$spatial$ForestRaster here once the rasterized
-      # inventory GeoTIFF (3-layer: theme hash, age, block ID) is available.
-      #
-      # ForestRaster requires:
-      #   hdt_map      — dict mapping raster hash values → dev type tuples
-      #   hdt_func     — hash function encoding dev type tuples → integer
-      #   src_path     — path to 3-layer input inventory GeoTIFF
-      #   snk_path     — output directory for disturbance GeoTIFFs
-      #   acode_map    — dict of disturbance codes → output filename prefixes
-      #   forestmodel  — the ForestModel instance (sim$.ws3fm)
-      #   base_year, period_length, horizon
-      #
-      # See: https://github.com/UBC-FRESH/ws3/blob/main/ws3/spatial.py
-      #
-      # Until ForestRaster is wired up, ws3Plan will skip spatial allocation
-      # and log a warning per period.
-      sim$.ws3fr <- NULL
 
       sim <- scheduleEvent(sim, start(sim), "biomass_ws3Harvest", "ws3Plan",
                            eventPriority = 2)   # after updateCurves (priority 1)
@@ -295,22 +276,66 @@ with open('%s', 'w') as _f:
     return(sim)
   }
 
-  # ── 6. Allocate spatial harvest schedule ────────────────────────────────────
+  # ── 6. Build inventory raster and allocate spatial harvest schedule ──────────
+  # ForestRaster is re-initialised each period from current forest state so the
+  # inventory always reflects Biomass_core's growth model rather than ws3 age tracking.
+  # horizon=1 allocates the current period only; allocate_schedule writes one
+  # clearcut_{year}.tif per annual sub-step consumed by step 8 below.
   outDir <- file.path(outputPath(sim), "harvest")
   dir.create(outDir, showWarnings = FALSE, recursive = TRUE)
 
-  # ForestRaster.allocate_schedule writes one GeoTIFF per action per year.
-  # ForestRaster requires a pre-built rasterized inventory and hdt_map/hdt_func
-  # (see TODO in init block). Until those are wired up, spatial allocation is skipped.
-  if (!is.null(sim$.ws3fr)) {
-    sim$.ws3fr$allocate_schedule(outDir)
-  } else {
-    warning("biomass_ws3Harvest: ForestRaster not initialised — spatial harvest allocation ",
-            "skipped for period at year ", time(sim), ". See TODO in init block.")
-  }
+  inv <- buildInventoryRaster(
+    cohortData    = cd,
+    pixelGroupMap = sim$pixelGroupMap,
+    period_length = as.integer(params(sim)$.globals$ws3PeriodLength),
+    base_year     = as.integer(time(sim)),
+    out_dir       = outDir
+  )
+
+  py_main <- reticulate::import_main()
+  py_main$`_ws3fm`             <- fm
+  py_main$`_ws3_hdt_table`     <- inv$hdt_table
+  py_main$`_ws3_inv_path`      <- as.character(inv$path)
+  py_main$`_ws3_snk_path`      <- as.character(outDir)
+  py_main$`_ws3_base_year`     <- as.integer(time(sim))
+  py_main$`_ws3_period_length` <- as.integer(params(sim)$.globals$ws3PeriodLength)
+
+  reticulate::py_run_string("
+import ws3.common as _ws3c, ws3.spatial as _ws3s
+_hdt_map = {
+    int(row['hash_val']): (row['speciesCode'], row['site_quality'], row['ecoregionGroup'])
+    for _, row in _ws3_hdt_table.iterrows()
+}
+_fr = _ws3s.ForestRaster(
+    hdt_map          = _hdt_map,
+    hdt_func         = _ws3c.hash_dt,
+    src_path         = _ws3_inv_path,
+    snk_path         = _ws3_snk_path,
+    acode_map        = {'clearcut': 'clearcut'},
+    forestmodel      = _ws3fm,
+    base_year        = _ws3_base_year,
+    period_length    = _ws3_period_length,
+    horizon          = 1,
+    piggyback_acodes = {}
+)
+_fr.allocate_schedule(mask=('?', '?', '?'), sda_mode='randblk', nthresh=1)
+")
 
   # ── 7. Record schedule for reporting ────────────────────────────────────────
-  sim$ws3HarvestSchedule <- data.table::as.data.table(p$solution())
+  # compile_product(t, 'vol', acode='clearcut') reads fm.applied_actions[t]
+  # (populated by p$solve()) and returns sum(vol * area) across all dev types
+  # and ages — giving us the true per-period harvested volume.
+  py_main <- reticulate::import_main()
+  py_main$`_ws3fm_sched` <- fm
+  reticulate::py_run_string("
+import pandas as _pd
+_sched_df = _pd.DataFrame(
+    [(int(_t), float(_ws3fm_sched.compile_product(_t, 'vol', acode='clearcut') or 0.0))
+     for _t in _ws3fm_sched.periods],
+    columns=['period', 'vol_harvested']
+)
+")
+  sim$ws3HarvestSchedule <- data.table::as.data.table(reticulate::py_eval("_sched_df"))
 
   # ── 8. Apply harvest to cohortData year by year ─────────────────────────────
   period <- seq(time(sim), time(sim) + params(sim)$.globals$ws3PeriodLength - 1)
