@@ -302,6 +302,16 @@ with open('%s', 'w') as _f:
 
   reticulate::py_run_string("
 import ws3.common as _ws3c, ws3.spatial as _ws3s
+# Workaround for ws3 (<= 1.0.5, main 2026-08): a transition with no age condition is stored
+# under age -1, and ForestModel.apply_action() falls back to it, but
+# ForestRaster.allocate_schedule() looks transitions up by exact age, with no fallback, and
+# raises KeyError: ('null', 9). Copy each age -1 transition to every age that has none: the
+# same target, so the aspatial model is unchanged. Remove once ws3 falls back to -1 there.
+for _dt in _ws3fm.dtypes.values():
+    for (_acode, _age), _target in list(_dt.transitions.items()):
+        if _age == -1:
+            for _a in range(0, _ws3fm.max_age + 1):
+                _dt.transitions.setdefault((_acode, _a), _target)
 _hdt_map = {
     int(row['hash_val']): (row['speciesCode'], row['site_quality'], row['ecoregionGroup'])
     for _, row in _ws3_hdt_table.iterrows()
@@ -311,7 +321,7 @@ _fr = _ws3s.ForestRaster(
     hdt_func         = _ws3c.hash_dt,
     src_path         = _ws3_inv_path,
     snk_path         = _ws3_snk_path,
-    acode_map        = {'clearcut': 'clearcut'},
+    acode_map        = {'clearcut': 'clearcut', 'null': 'null'},  # every applied action needs a sink
     forestmodel      = _ws3fm,
     base_year        = _ws3_base_year,
     period_length    = _ws3_period_length,
