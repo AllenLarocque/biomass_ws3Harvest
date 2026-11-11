@@ -26,7 +26,7 @@ buildWs3Inventory <- function(cohortData, pixelArea, periodLength,
 
   # Build dev type key for each cohort (scalar devTypeTupleKey called row-by-row)
   cd[, devTypeKey  := mapply(devTypeTupleKey, speciesCode, site_quality, ecoregionGroup)]
-  cd[, age_class   := floor(age / periodLength)]
+  cd[, age_class   := as.integer(floor(age / periodLength))]  # integer: ws3 keys by int age
   cd[, harvestable := age >= minHarvestAge]
 
   # join pixel areas once per pixel
