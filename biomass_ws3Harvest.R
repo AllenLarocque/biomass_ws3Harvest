@@ -209,17 +209,9 @@ def _lndr_cflw(fm, path, expr='vol', mask=None):
   z_fn    <- reticulate::py_eval("_partial(_lndr_z,    expr='vol')")
   cflw_fn <- reticulate::py_eval("_partial(_lndr_cflw, expr='vol')")
 
-  # Even-flow constraint: allow up to 5% deviation between adjacent periods.
-  # Built in Python to ensure integer period keys and tuple (epsilon_dict, lag)
-  # format that ws3.forest.ForestModel.add_problem() expects.
-  py_main <- reticulate::import_main()
-  py_main$`_ws3_horizon` <- as.integer(P(sim)$ws3Horizon)
-  reticulate::py_run_string("
-_cflw_e  = {'cflw_vol': ({t: 0.05 for t in range(1, _ws3_horizon + 1)}, 1)}
-_acodes  = ['null', 'clearcut']
-")
-  cflw_e_py <- reticulate::py_eval("_cflw_e")
-  acodes_py <- reticulate::py_eval("_acodes")
+  # Even-flow constraint: allow up to 5% deviation from the period-1 harvest.
+  cflw_e_py <- ws3FlowConstraints("cflw_vol", P(sim)$ws3Horizon, 0.05)
+  acodes_py <- reticulate::r_to_py(list("null", "clearcut"))
   ws3opt    <- reticulate::import("ws3.opt")
 
   ws3LogPath <- file.path(outputPath(sim), "ws3_python_error.log")

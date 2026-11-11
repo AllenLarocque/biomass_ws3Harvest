@@ -101,3 +101,12 @@ test_that("applyWs3Solution warns when the schedule cannot be fully applied", {
   skip_if_no_ws3()
   expect_warning(applyWs3Solution(mock_ws3_model(12.5), "p"), regexp = "12.5 ha")
 })
+
+test_that("ws3FlowConstraints keeps integer period keys and the tuple ws3 expects", {
+  ## Through R the keys become strings: ws3 then finds no period in them and adds no constraint
+  skip_if_no_ws3()
+  e <- ws3FlowConstraints("cflw_vol", horizon = 3L, epsilon = 0.05)
+  check <- reticulate::py_eval(
+    "lambda e: isinstance(e['cflw_vol'], tuple) and e['cflw_vol'][0] == {1: 0.05, 2: 0.05, 3: 0.05} and e['cflw_vol'][1] == 1")
+  expect_true(reticulate::py_to_r(check(e)))
+})

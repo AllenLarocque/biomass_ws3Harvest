@@ -1,5 +1,16 @@
 # applyHarvestSchedule(): apply WS3 harvest schedule to LandR cohortData and pixelGroupMap
 
+# ws3FlowConstraints(): the cflw_e argument of ForestModel.add_problem(), holding the output
+# within `epsilon` of its period-1 value. Returned unconverted: through R, the integer period
+# keys become strings, ws3 finds none of its periods in them, and adds no constraint.
+ws3FlowConstraints <- function(name, horizon, epsilon) {
+  reticulate::py_run_string("
+def _ws3_cflw(name, horizon, epsilon):
+    return {name: ({t: epsilon for t in range(1, int(horizon) + 1)}, 1)}
+")
+  reticulate::py_eval("_ws3_cflw", convert = FALSE)(name, as.integer(horizon), epsilon)
+}
+
 # applyWs3Solution(): make a solved ws3 problem the model's schedule. add_problem() resets the
 # model for each stand type it enumerates, so after solve() applied_actions holds only the last
 # one built; the solution has to be compiled and applied before anything reads it.
