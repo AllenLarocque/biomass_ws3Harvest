@@ -1,5 +1,22 @@
 # applyHarvestSchedule(): apply WS3 harvest schedule to LandR cohortData and pixelGroupMap
 
+# applyWs3Solution(): make a solved ws3 problem the model's schedule. add_problem() resets the
+# model for each stand type it enumerates, so after solve() applied_actions holds only the last
+# one built; the solution has to be compiled and applied before anything reads it.
+# Done in Python: through R, the schedule's development type tuples would become lists.
+applyWs3Solution <- function(fm, problem) {
+  reticulate::py_run_string("
+def _ws3_apply_solution(fm, problem):
+    return fm.apply_schedule(fm.compile_schedule(problem), force_integral_area=False,
+                             fuzzy_age=False, recourse_enabled=False, compile_c_ycomps=True)
+")
+  missing <- reticulate::py_to_r(reticulate::py_eval("_ws3_apply_solution")(fm, problem))
+  if (isTRUE(missing > 0)) {
+    warning("applyWs3Solution: ", round(missing, 2), " ha of the solved schedule could not be applied")
+  }
+  invisible(fm)
+}
+
 applyClearcut <- function(harvestRast, cohortData, pixelGroupMap) {
   stopifnot(
     inherits(harvestRast, "SpatRaster"),

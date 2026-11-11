@@ -268,6 +268,8 @@ with open('%s', 'w') as _f:
     return(sim)
   }
 
+  applyWs3Solution(fm, p)
+
   # ── 6. Build inventory raster and allocate spatial harvest schedule ──────────
   # ForestRaster is re-initialised each period from current forest state so the
   # inventory always reflects Biomass_core's growth model rather than ws3 age tracking.

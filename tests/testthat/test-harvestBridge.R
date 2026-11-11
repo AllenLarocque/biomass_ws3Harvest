@@ -74,3 +74,30 @@ test_that("applyHarvestAction warns and returns cohortData unchanged for unknown
   )
   expect_equal(result$B, cd$B)
 })
+
+mock_ws3_model <- function(missing) {
+  reticulate::py_run_string(sprintf("
+class _MockFm:
+    applied = None
+    def compile_schedule(self, problem):
+        return [(('A', 'med', 'E'), 50, 1.0, 'clearcut', 1, '_existing')]
+    def apply_schedule(self, schedule, **kwargs):
+        self.applied = schedule
+        return %s
+", missing))
+  reticulate::py_eval("_MockFm()")
+}
+
+test_that("applyWs3Solution applies the solved schedule, with its tuples intact", {
+  ## add_problem() leaves only the last tree it built in applied_actions; solve() applies nothing.
+  ## The schedule must stay in Python: through R, its dev type tuples become unhashable lists.
+  skip_if_no_ws3()
+  fm <- mock_ws3_model(0)
+  applyWs3Solution(fm, "p")
+  expect_true(reticulate::py_to_r(reticulate::py_eval("lambda fm: isinstance(fm.applied[0][0], tuple)")(fm)))
+})
+
+test_that("applyWs3Solution warns when the schedule cannot be fully applied", {
+  skip_if_no_ws3()
+  expect_warning(applyWs3Solution(mock_ws3_model(12.5), "p"), regexp = "12.5 ha")
+})
