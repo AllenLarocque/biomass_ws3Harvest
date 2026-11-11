@@ -86,3 +86,10 @@ test_that("buildWs3Inventory age_class bins follow floor(age / periodLength)", {
   expect_true(8L %in% result$age_class)
   expect_true(5L %in% result$age_class)
 })
+
+test_that("buildWs3Inventory age_class is integer, as ws3 keys transitions by integer age", {
+  ## A double age_class reached ws3 as a float (e.g. 9.0); ForestRaster.allocate_schedule then
+  ## failed with KeyError: ('null', 9.0) looking up dtype transitions keyed by int age
+  result <- buildWs3Inventory(mock_cohortData_binned(), mock_pixelArea(), periodLength = 10L, minHarvestAge = 40L)
+  expect_type(result$age_class, "integer")
+})
