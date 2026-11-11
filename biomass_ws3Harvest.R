@@ -147,10 +147,6 @@ def _ws3_ensure_dtype(fm, dtkey):
 ")
   ensure_dtype <- reticulate::py_eval("_ws3_ensure_dtype")
 
-  currentPeriod <- as.integer(
-    (time(sim) - P(sim)$ws3BaseYear) / params(sim)$.globals$ws3PeriodLength
-  )
-
   for (key in names(sim$ws3YieldCurves)) {
     curve_data <- sim$ws3YieldCurves[[key]]
     dtkey      <- to_dtkey(key)   # Python tuple e.g. ('Pice_mar', 'med', 'ECO_1')
@@ -167,13 +163,9 @@ def _ws3_ensure_dtype(fm, dtkey):
         xmax          = fm$max_age)
       fm$dt(dtkey)$add_ycomp("a", "vol", ws3_curve)
     }
-
-    # Load current-period inventory areas (always, even for existing dtypes)
-    invRows <- inv[devTypeKey == key]
-    for (i in seq_len(nrow(invRows))) {
-      fm$dt(dtkey)$area(currentPeriod, invRows$age_class[i], invRows$area_ha[i])
-    }
   }
+
+  loadWs3Inventory(fm, inv)
 
   # Register 'vol' in fm$ynames so compile_product() can substitute it.
   # add_ycomp() on a dtype does NOT update fm$ynames; compile_product() checks

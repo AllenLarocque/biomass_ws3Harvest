@@ -3,11 +3,6 @@ library(testthat)
 library(data.table)
 library(terra)
 
-skip_if_no_ws3 <- function() {
-  if (!reticulate::py_module_available("ws3"))
-    skip("ws3 Python package not available")
-}
-
 test_that("buildInventoryRaster returns named list with path and hdt_table", {
   skip_if_no_ws3()
   tmp <- tempdir()
@@ -85,11 +80,11 @@ test_that("buildInventoryRaster encodes non-forest cells as 0 in all bands", {
   expect_true(all(vals_b1[na_idx] == 0L))
 })
 
-test_that("buildInventoryRaster band 2 uses dominant cohort age in periods", {
+test_that("buildInventoryRaster band 2 is the dominant cohort age in years, as in the inventory", {
   skip_if_no_ws3()
   tmp <- tempdir()
   # mock_cohortData_binned(): pixelGroup 2 dominant cohort has age=80, period_length=10
-  # → age_periods = ceiling(80/10) = 8
+  # → age class 80, the value buildWs3Inventory gives ws3 for the same stand
   result <- buildInventoryRaster(
     cohortData    = mock_cohortData_binned(),
     pixelGroupMap = mock_pixelGroupMap(),
@@ -101,7 +96,7 @@ test_that("buildInventoryRaster band 2 uses dominant cohort age in periods", {
   b2     <- terra::values(r[[2L]], mat = FALSE)
   pg_map <- terra::values(mock_pixelGroupMap(), mat = FALSE)
   pg2_cells <- which(pg_map == 2L)
-  expect_true(all(b2[pg2_cells] == 8L))
+  expect_true(all(b2[pg2_cells] == 80L))
 })
 
 test_that("buildInventoryRaster band 3 equals pixelGroup ID (block ID)", {

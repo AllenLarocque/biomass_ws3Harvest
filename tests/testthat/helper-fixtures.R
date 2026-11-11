@@ -25,6 +25,11 @@ source("../../R/spatialBridge.R")
 if (nchar(Sys.getenv("TESTTHAT_WD")) == 0L)
   Sys.setenv(TESTTHAT_WD = normalizePath(file.path(getwd(), "..", "..", "..", "..")))
 
+skip_if_no_ws3 <- function() {
+  if (!reticulate::py_module_available("ws3"))
+    skip("ws3 Python package not available")
+}
+
 # ── Mock data factories ──────────────────────────────────────────────────────
 
 #' cohortData with site_quality column (post-binSiteQuality).

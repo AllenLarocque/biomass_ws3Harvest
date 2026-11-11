@@ -5,7 +5,7 @@
 #   cohortData    data.table — must have: pixelGroup, speciesCode, site_quality,
 #                              ecoregionGroup, age, B (site_quality pre-binned by caller)
 #   pixelGroupMap SpatRaster — integer pixel group IDs; NA where no forest
-#   period_length integer    — years per WS3 period (for age → age-in-periods)
+#   period_length integer    — years per WS3 period (for age class binning)
 #   base_year     integer    — current calendar year (= time(sim)); used in filename
 #   out_dir       character  — output directory (same dir step 8 reads from)
 #
@@ -14,7 +14,7 @@
 #
 # GeoTIFF band layout (INT4S, nodata=0):
 #   Band 1: ws3.common.hash_dt((speciesCode, site_quality, ecoregionGroup)) for dominant cohort
-#   Band 2: ceiling(age / period_length) for dominant cohort
+#   Band 2: age class in years for dominant cohort, as in buildWs3Inventory (ws3AgeClass)
 #   Band 3: pixelGroup ID (block ID for ForestRaster randblk allocation)
 #
 # Non-forest pixels (NA in pixelGroupMap) are written as 0 in all bands.
@@ -32,8 +32,7 @@ buildInventoryRaster <- function(cohortData, pixelGroupMap, period_length, base_
   )
 
   # ── 1. Dominant cohort per pixelGroup (max B) ─────────────────────────────
-  dom <- cohortData[, .SD[which.max(B)], by = pixelGroup,
-                    .SDcols = c("speciesCode", "site_quality", "ecoregionGroup", "age")]
+  dom <- dominantCohort(cohortData)[, .(pixelGroup, speciesCode, site_quality, ecoregionGroup, age)]
 
   # ── 2. Hash unique dev type tuples via ws3.common.hash_dt ─────────────────
   # Import once; hash_dt(tuple) → numpy int32. py_to_r returns R numeric (double),
@@ -55,8 +54,8 @@ buildInventoryRaster <- function(cohortData, pixelGroupMap, period_length, base_
   dom <- merge(dom, unique_dtypes, by = c("speciesCode", "site_quality", "ecoregionGroup"),
                all.x = TRUE)
 
-  # ── 3. Age in periods and block ID ────────────────────────────────────────
-  dom[, age_periods := as.integer(ceiling(age / period_length))]
+  # ── 3. Age class and block ID ────────────────────────────────────────
+  dom[, age_class := ws3AgeClass(age, period_length)]
   dom[, block_id    := as.integer(pixelGroup)]
 
   # ── 4. Rasterize: one classify() call per band ───────────────────────────
@@ -66,7 +65,7 @@ buildInventoryRaster <- function(cohortData, pixelGroupMap, period_length, base_
   pg <- as.integer(dom$pixelGroup)
 
   band1 <- terra::classify(pixelGroupMap, cbind(pg, dom$hash_val),    others = NA)
-  band2 <- terra::classify(pixelGroupMap, cbind(pg, dom$age_periods),  others = NA)
+  band2 <- terra::classify(pixelGroupMap, cbind(pg, dom$age_class),    others = NA)
   band3 <- terra::classify(pixelGroupMap, cbind(pg, dom$block_id),     others = NA)
 
   inv_rast <- c(band1, band2, band3)
