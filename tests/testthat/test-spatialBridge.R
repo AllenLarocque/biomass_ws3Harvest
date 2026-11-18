@@ -77,7 +77,8 @@ test_that("buildInventoryRaster encodes non-forest cells as 0 in all bands", {
   vals_b1 <- terra::values(r[[1L]], mat = FALSE)
   pg_vals <- terra::values(mock_pixelGroupMap(), mat = FALSE)
   na_idx  <- which(is.na(pg_vals))
-  expect_true(all(vals_b1[na_idx] == 0L))
+  ## 0 is the file's nodata value: terra reads it back as NA, rasterio (ws3) as 0
+  expect_true(all(is.na(vals_b1[na_idx])))
 })
 
 test_that("buildInventoryRaster band 2 is the dominant cohort age in years, as in the inventory", {
@@ -162,5 +163,5 @@ test_that("buildInventoryRaster encodes orphan pixelGroup (in map, absent from c
     out_dir       = tempdir()
   )
   b1 <- terra::values(terra::rast(result$path)[[1L]], mat = FALSE)
-  expect_equal(b1[4L], 0L)
+  expect_true(is.na(b1[4L]))   # written as 0, the nodata value, which terra reads as NA
 })
