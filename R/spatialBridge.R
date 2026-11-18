@@ -85,3 +85,27 @@ buildInventoryRaster <- function(cohortData, pixelGroupMap, period_length, base_
     hdt_table = unique_dtypes[, .(hash_val, speciesCode, site_quality, ecoregionGroup)]
   )
 }
+
+# ws3ExactAgeAllocation(): make a ws3.spatial.ForestRaster take only cells of exactly the
+# scheduled age. ws3 (1.0.5) accepts cells within one period length of it, so with 10-year age
+# classes an age-40 prescription can cut age-30 cells, below the minimum harvest age. During each
+# call, other ages are moved out of reach and then restored; cells it transitions are all of the
+# scheduled age, so none of them is shifted back. Remove once ws3 matches ages exactly.
+ws3ExactAgeAllocation <- function(fr) {
+  reticulate::py_run_string("
+def _ws3_exact_age(fr):
+    orig = fr._transition_cells
+    def _transition_cells(from_dtk, from_age, *args, **kwargs):
+        ages = fr._x[1]
+        away = (ages != from_age) & (fr._x[0] != 0)
+        ages[away] += 1000000
+        try:
+            return orig(from_dtk, from_age, *args, **kwargs)
+        finally:
+            ages[away] -= 1000000
+    fr._transition_cells = _transition_cells
+    return fr
+")
+  reticulate::py_eval("_ws3_exact_age")(fr)
+  invisible(fr)
+}

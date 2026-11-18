@@ -128,3 +128,26 @@ test_that("loadWs3Inventory warns about area with no development type", {
   expect_warning(loadWs3Inventory(fm, data.table(devTypeKey = "A|med|E", age_class = 70L, area_ha = 5)),
                  regexp = "5 ha")
 })
+
+test_that("buildWs3Inventory returns a typed empty table when there are no cohorts", {
+  result <- buildWs3Inventory(mock_cohortData_binned()[0], mock_pixelArea(), periodLength = 10L)
+  expect_equal(nrow(result), 0L)
+  expect_type(result$age_class, "integer")
+  expect_type(result$area_ha, "double")
+})
+
+test_that("ws3PixelArea gives each pixel group its cell count times the cell area", {
+  r <- terra::rast(nrows = 2L, ncols = 2L, xmin = 0, xmax = 500, ymin = 0, ymax = 500, crs = "EPSG:3005")
+  terra::values(r) <- c(1L, 1L, 0L, NA)
+  pa <- ws3PixelArea(r)
+  expect_equal(pa[pixelGroup == 1L, area_ha], 12.5)
+  expect_false(0L %in% pa$pixelGroup)
+})
+
+test_that("ws3PixelArea refuses grids that ws3's raster allocation would measure differently", {
+  ## ws3.spatial.ForestRaster takes a cell's area as (x resolution in m)^2
+  expect_error(ws3PixelArea(mock_pixelGroupMap()), regexp = "projected")              # lon/lat
+  r <- terra::rast(nrows = 2L, ncols = 2L, xmin = 0, xmax = 500, ymin = 0, ymax = 1000, crs = "EPSG:3005")
+  terra::values(r) <- 1L
+  expect_error(ws3PixelArea(r), regexp = "square")
+})

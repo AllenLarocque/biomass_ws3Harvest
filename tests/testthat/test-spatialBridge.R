@@ -165,3 +165,23 @@ test_that("buildInventoryRaster encodes orphan pixelGroup (in map, absent from c
   b1 <- terra::values(terra::rast(result$path)[[1L]], mat = FALSE)
   expect_true(is.na(b1[4L]))   # written as 0, the nodata value, which terra reads as NA
 })
+
+test_that("ws3ExactAgeAllocation lets ForestRaster take only cells of the scheduled age", {
+  ## ws3's _transition_cells accepts cells within one period length of the scheduled age, so an
+  ## age-40 prescription could cut age-30 cells, below the minimum harvest age
+  skip_if_no_ws3()
+  reticulate::py_run_string("
+import numpy as _np
+class _MockFr:
+    def __init__(self):
+        self._x = _np.array([[[7, 7, 7]], [[30, 40, 50]], [[1, 2, 3]]], dtype=_np.int32)
+    def _transition_cells(self, from_dtk, from_age, to_dtk, to_age, tarea, acode, dy, **kw):
+        ages = self._x[1]
+        ages[_np.abs(ages - from_age) <= 10] = to_age   # ws3's tolerance, as in spatial.py
+        return 0.
+")
+  fr <- reticulate::py_eval("_MockFr()")
+  ws3ExactAgeAllocation(fr)
+  fr$`_transition_cells`("k", 40L, "k", 1L, 1, "clearcut", 0L)
+  expect_equal(as.integer(reticulate::py_to_r(fr$`_x`)[2, 1, ]), c(30L, 1L, 50L))
+})

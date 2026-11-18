@@ -111,6 +111,8 @@ del _fm, _ws3fm_init
         sim$cohortData        <- res$cohortData
         sim$pixelGroupMap     <- res$pixelGroupMap
         sim$rstCurrentHarvest <- res$harvestRast
+      } else {
+        sim$rstCurrentHarvest <- NULL   # no cut this year: do not leave last year's showing
       }
       sim <- scheduleEvent(sim, time(sim) + 1, "biomass_ws3Harvest", "harvest", eventPriority = 2.5)
     }
@@ -129,11 +131,7 @@ del _fm, _ws3fm_init
   fm  <- sim$.ws3fm
 
   # ── 1. Derive pixel areas ───────────────────────────────────────────────────
-  cellArea_ha <- terra::cellSize(sim$pixelGroupMap, unit = "ha")
-  pgVals      <- terra::values(sim$pixelGroupMap, mat = FALSE)
-  areaVals    <- terra::values(cellArea_ha, mat = FALSE)
-  pixelArea   <- data.table::data.table(pixelGroup = pgVals, area_ha = areaVals)
-  pixelArea   <- pixelArea[!is.na(pixelGroup), .(area_ha = sum(area_ha)), by = pixelGroup]
+  pixelArea <- ws3PixelArea(sim$pixelGroupMap)
 
   # ── 2. Bin site quality (use max maxANPP across ecoregions per species as ceiling) ──
   speciesMaxANPP <- sim$speciesEcoregion[, .(globalMaxANPP = max(maxANPP, na.rm = TRUE)),
@@ -146,6 +144,12 @@ del _fm, _ws3fm_init
     periodLength  = params(sim)$.globals$ws3PeriodLength,
     minHarvestAge = P(sim)$ws3MinHarvestAge
   )
+
+  if (sum(inv$area_ha) <= 0) {
+    warning("biomass_ws3Harvest: no forest to plan at year ", time(sim), " — no harvest this period")
+    sim$ws3HarvestSchedule <- NULL
+    return(sim)
+  }
 
   # ── 4. Load inventory and yield curves into WS3 ─────────────────────────────
   core      <- reticulate::import("ws3.core")
@@ -277,6 +281,7 @@ with open('%s', 'w') as _f:
   if (p$status() != "optimal") {
     warning("biomass_ws3Harvest: WS3 solve status '", p$status(),
             "' at year ", time(sim), " — skipping harvest this period")
+    sim$ws3HarvestSchedule <- NULL   # so the previous period's schedule is not reported again
     return(sim)
   }
 
@@ -334,8 +339,9 @@ _fr = _ws3s.ForestRaster(
     horizon          = 1,
     piggyback_acodes = {}
 )
-_fr.allocate_schedule(mask=('?', '?', '?'), sda_mode='randblk', nthresh=1)
 ")
+  ws3ExactAgeAllocation(reticulate::py_eval("_fr", convert = FALSE))
+  reticulate::py_run_string("_fr.allocate_schedule(mask=('?', '?', '?'), sda_mode='randblk', nthresh=1)")
 
   # ── 7. Record schedule for reporting ────────────────────────────────────────
   # compile_product(t, 'vol', acode='clearcut') reads fm.applied_actions[t]

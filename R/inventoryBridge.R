@@ -19,6 +19,21 @@ ws3AgeClass <- function(age, periodLength) {
   as.integer(floor(age / periodLength) * periodLength)
 }
 
+# ws3PixelArea(): forested area per pixel group, data.table(pixelGroup, area_ha). Every cell gets
+# the area ws3.spatial.ForestRaster will use for it, (x resolution in m)^2, so the LP and the
+# raster allocation count the same hectares; grids where that is wrong are refused.
+ws3PixelArea <- function(pixelGroupMap) {
+  if (terra::is.lonlat(pixelGroupMap) || !isTRUE(terra::linearUnits(pixelGroupMap) == 1)) {
+    stop("ws3PixelArea: pixelGroupMap must be in a projected CRS in metres")
+  }
+  res <- terra::res(pixelGroupMap)
+  if (!isTRUE(all.equal(res[1], res[2]))) {
+    stop("ws3PixelArea: pixelGroupMap must have square cells (resolution ", paste(res, collapse = " x "), ")")
+  }
+  pg <- terra::values(pixelGroupMap, mat = FALSE)
+  data.table(pixelGroup = pg[!is.na(pg) & pg > 0L])[, .(area_ha = .N * res[1]^2 / 1e4), by = pixelGroup]
+}
+
 buildWs3Inventory <- function(cohortData, pixelArea, periodLength,
                                minHarvestAge = 40L) {
   # cohortData must have columns: pixelGroup, speciesCode, ecoregionGroup,
@@ -35,6 +50,11 @@ buildWs3Inventory <- function(cohortData, pixelArea, periodLength,
     length(periodLength) == 1L, periodLength > 0,
     length(minHarvestAge) == 1L, minHarvestAge >= 0
   )
+
+  if (nrow(cohortData) == 0L) {
+    return(data.table(devTypeKey = character(), age_class = integer(), area_ha = numeric(),
+                      harvestable = logical()))
+  }
 
   # Each pixel group counts once, under its dominant cohort, so areas sum to the forested area
   cd <- dominantCohort(cohortData)
