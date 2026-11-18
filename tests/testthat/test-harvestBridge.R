@@ -2,77 +2,73 @@
 # Both are tested here because applyHarvestAction is a thin dispatcher over applyClearcut.
 
 # ── applyClearcut ─────────────────────────────────────────────────────────────
+# mock_pixelGroupMap(): cells 1-2 → pixelGroup 1, cells 3-4 → 2, cells 5-6 → 3, 7-9 NA
 
-test_that("applyClearcut sets B = 0 for harvested pixel groups", {
-  cd  <- mock_cohortData_binned()
-  pgm <- mock_pixelGroupMap()
-  hr  <- mock_harvest_raster(harvested_cells = 1L)   # cell 1 → pixelGroup 1
-  result <- applyClearcut(hr, cd, pgm)
-  expect_true(all(result[pixelGroup == 1L, B] == 0L))
-})
-
-test_that("applyClearcut sets aNPPAct = 0 for harvested pixel groups", {
-  cd  <- mock_cohortData_binned()
-  result <- applyClearcut(mock_harvest_raster(1L), cd, mock_pixelGroupMap())
-  expect_true(all(result[pixelGroup == 1L, aNPPAct] == 0L))
-})
-
-test_that("applyClearcut sets mortality = original B before zeroing", {
-  cd           <- mock_cohortData_binned()
-  original_B   <- cd[pixelGroup == 1L, B]
-  result       <- applyClearcut(mock_harvest_raster(1L), cd, mock_pixelGroupMap())
-  expect_equal(result[pixelGroup == 1L, mortality], original_B)
-})
-
-test_that("applyClearcut leaves unharvested pixel groups unchanged", {
-  cd     <- mock_cohortData_binned()
-  result <- applyClearcut(mock_harvest_raster(1L), cd, mock_pixelGroupMap())
-  expect_equal(result[pixelGroup == 2L, B], cd[pixelGroup == 2L, B])
-  expect_equal(result[pixelGroup == 3L, B], cd[pixelGroup == 3L, B])
-})
-
-test_that("applyClearcut harvests entire pixel group when any cell is harvested", {
-  # cells 1 and 2 both map to pixelGroup 1 — harvesting cell 2 should also clear cell 1 cohorts
+test_that("applyClearcut empties only the cut cells", {
+  ## Pixel groups are not contiguous and regenerated stands share them across thousands of
+  ## pixels: clearing the whole group removed up to 54% more forest than ws3 allocated
   cd     <- mock_cohortData_binned()
   result <- applyClearcut(mock_harvest_raster(harvested_cells = 2L), cd, mock_pixelGroupMap())
-  expect_true(all(result[pixelGroup == 1L, B] == 0L))
+  pgv    <- terra::values(result$pixelGroupMap, mat = FALSE)
+  expect_equal(pgv[1:6], c(1L, 0L, 2L, 2L, 3L, 3L))   # 0 = forest with no cohorts (LandR)
+  expect_equal(result$cohortData, cd)                 # pixel group 1 still has cell 1
 })
 
-test_that("applyClearcut returns a data.table", {
-  result <- applyClearcut(mock_harvest_raster(1L), mock_cohortData_binned(), mock_pixelGroupMap())
-  expect_s3_class(result, "data.table")
-})
-
-test_that("applyClearcut preserves row count", {
+test_that("applyClearcut drops the cohorts of pixel groups left with no cells", {
   cd     <- mock_cohortData_binned()
-  result <- applyClearcut(mock_harvest_raster(1L), cd, mock_pixelGroupMap())
-  expect_equal(nrow(result), nrow(cd))
+  result <- applyClearcut(mock_harvest_raster(harvested_cells = 1:2), cd, mock_pixelGroupMap())
+  expect_false(1L %in% result$cohortData$pixelGroup)
+  expect_equal(result$cohortData, cd[pixelGroup != 1L])
 })
 
-test_that("applyClearcut with no harvested cells leaves cohortData unchanged", {
+test_that("applyClearcut leaves NA cells NA and does not modify its inputs", {
+  pgm    <- mock_pixelGroupMap()
+  result <- applyClearcut(mock_harvest_raster(harvested_cells = c(1L, 8L)), mock_cohortData_binned(), pgm)
+  expect_true(is.na(terra::values(result$pixelGroupMap, mat = FALSE)[8]))
+  expect_equal(terra::values(pgm, mat = FALSE)[1], 1L)
+})
+
+test_that("applyClearcut with no harvested cells changes nothing", {
   cd     <- mock_cohortData_binned()
-  hr_empty <- mock_harvest_raster(harvested_cells = integer(0))
-  result <- applyClearcut(hr_empty, cd, mock_pixelGroupMap())
-  expect_equal(result$B, cd$B)
+  pgm    <- mock_pixelGroupMap()
+  result <- applyClearcut(mock_harvest_raster(harvested_cells = integer(0)), cd, pgm)
+  expect_equal(result$cohortData, cd)
+  expect_equal(terra::values(result$pixelGroupMap, mat = FALSE), terra::values(pgm, mat = FALSE))
 })
 
 # ── applyHarvestAction ────────────────────────────────────────────────────────
 
 test_that("applyHarvestAction dispatches 'clearcut' to applyClearcut", {
-  cd     <- mock_cohortData_binned()
-  result <- applyHarvestAction("clearcut",
-                                mock_harvest_raster(1L), cd, mock_pixelGroupMap())
-  expect_true(all(result[pixelGroup == 1L, B] == 0L))
+  result <- applyHarvestAction("clearcut", mock_harvest_raster(1:2), mock_cohortData_binned(),
+                               mock_pixelGroupMap())
+  expect_false(1L %in% result$cohortData$pixelGroup)
 })
 
-test_that("applyHarvestAction warns and returns cohortData unchanged for unknown action", {
+test_that("applyHarvestAction warns and changes nothing for an unknown action", {
   cd <- mock_cohortData_binned()
   expect_warning(
-    result <- applyHarvestAction("partial_cut",
-                                  mock_harvest_raster(1L), cd, mock_pixelGroupMap()),
+    result <- applyHarvestAction("partial_cut", mock_harvest_raster(1L), cd, mock_pixelGroupMap()),
     regexp = "unknown action"
   )
-  expect_equal(result$B, cd$B)
+  expect_equal(result$cohortData, cd)
+})
+
+# ── applyHarvestYear ──────────────────────────────────────────────────────────
+
+test_that("applyHarvestYear applies that year's clearcut raster only", {
+  ## ws3 allocates each year of a period separately; applying all ten at the period start
+  ## removed stands up to 9 years before ws3 planned to cut them, while LandR grows yearly
+  dir <- file.path(tempdir(), "harvestYear"); dir.create(dir, showWarnings = FALSE)
+  terra::writeRaster(mock_harvest_raster(1:2), file.path(dir, "clearcut_2015.tif"), overwrite = TRUE)
+  terra::writeRaster(mock_harvest_raster(3:4), file.path(dir, "clearcut_2016.tif"), overwrite = TRUE)
+  result <- applyHarvestYear(2015, dir, mock_cohortData_binned(), mock_pixelGroupMap())
+  expect_false(1L %in% result$cohortData$pixelGroup)
+  expect_true(2L %in% result$cohortData$pixelGroup)
+  expect_s4_class(result$harvestRast, "SpatRaster")
+})
+
+test_that("applyHarvestYear returns NULL when there is no raster for the year", {
+  expect_null(applyHarvestYear(1999, tempdir(), mock_cohortData_binned(), mock_pixelGroupMap()))
 })
 
 mock_ws3_model <- function(missing) {

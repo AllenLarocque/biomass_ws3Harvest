@@ -1,4 +1,4 @@
-# applyHarvestSchedule(): apply WS3 harvest schedule to LandR cohortData and pixelGroupMap
+# Apply the WS3 harvest schedule to LandR cohortData and pixelGroupMap
 
 # ws3FlowConstraints(): the cflw_e argument of ForestModel.add_problem(), holding the output
 # within `epsilon` of its period-1 value. Returned unconverted: through R, the integer period
@@ -28,6 +28,11 @@ def _ws3_apply_solution(fm, problem):
   invisible(fm)
 }
 
+# applyClearcut(): remove the forest from the cut cells only. Cut cells get pixelGroup 0, LandR's
+# code for forest with no cohorts (seed dispersal can recolonise them); cohorts of pixel groups
+# left with no cells are dropped. Pixel groups are not contiguous, and regenerated stands share
+# one across thousands of pixels, so clearing whole groups removed far more than ws3 allocated.
+# Returns list(cohortData, pixelGroupMap).
 applyClearcut <- function(harvestRast, cohortData, pixelGroupMap) {
   stopifnot(
     inherits(harvestRast, "SpatRaster"),
@@ -35,37 +40,23 @@ applyClearcut <- function(harvestRast, cohortData, pixelGroupMap) {
     is.data.table(cohortData),
     "pixelGroup" %in% names(cohortData)
   )
+  harvestVals <- terra::values(harvestRast, mat = FALSE)
+  pgVals      <- terra::values(pixelGroupMap, mat = FALSE)
+  cut <- which(!is.na(harvestVals) & harvestVals == 1L & !is.na(pgVals) & pgVals != 0L)
+  if (length(cut) == 0L) return(list(cohortData = cohortData, pixelGroupMap = pixelGroupMap))
 
-  # Identify pixel groups where any pixel was harvested
-  harvestVals  <- terra::values(harvestRast, mat = FALSE)
-  pgVals       <- terra::values(pixelGroupMap, mat = FALSE)
-  # Note: !is.na() is explicit for clarity; NA == 1L is already NA and excluded
-  harvestedPGs <- unique(pgVals[!is.na(harvestVals) & harvestVals == 1L])
-
-  # Clearcut semantics: if ANY pixel in a pixel group was scheduled for harvest,
-  # the entire pixel group's cohorts are removed (consistent with pixel-group abstraction).
-  cd <- copy(cohortData)
-  # Set mortality = B before zeroing (two separate := calls — data.table evaluates left-to-right)
-  cd[pixelGroup %in% harvestedPGs, mortality := B]
-  cd[pixelGroup %in% harvestedPGs, `:=`(B = 0L, aNPPAct = 0L)]
-  cd[]
+  pgVals[cut] <- 0L
+  pixelGroupMap <- terra::setValues(pixelGroupMap, pgVals)   # a new raster: the input is unchanged
+  list(cohortData = cohortData[pixelGroup %in% pgVals], pixelGroupMap = pixelGroupMap)
 }
 
-applyHarvestSchedule <- function(schedule, cohortData, pixelGroupMap,
-                                  outputPath, baseYear) {
-  # schedule: data.table with columns year, acode, area (from WS3 solution)
-  # Reads GeoTIFFs written by ForestRaster.allocate_schedule()
-  for (yr in unique(schedule$year)) {
-    yearSchedule <- schedule[year == yr]
-    for (ac in unique(yearSchedule$acode)) {
-      tifPath <- file.path(outputPath, sprintf("%s_%d.tif", ac, yr))
-      if (!file.exists(tifPath)) {
-        message("applyHarvestSchedule: GeoTIFF not found, skipping: ", tifPath)
-        next
-      }
-      harvestRast <- terra::rast(tifPath)
-      cohortData  <- applyHarvestAction(ac, harvestRast, cohortData, pixelGroupMap)
-    }
-  }
-  cohortData
+# applyHarvestYear(): apply the clearcut raster ws3 allocated to `year`, if there is one.
+# Returns list(cohortData, pixelGroupMap, harvestRast), or NULL when there is no raster.
+applyHarvestYear <- function(year, harvestPath, cohortData, pixelGroupMap) {
+  tifPath <- file.path(harvestPath, sprintf("clearcut_%d.tif", as.integer(year)))
+  if (!file.exists(tifPath)) return(NULL)
+  harvestRast <- terra::rast(tifPath)
+  out <- applyHarvestAction("clearcut", harvestRast, cohortData, pixelGroupMap)
+  out$harvestRast <- harvestRast
+  out
 }

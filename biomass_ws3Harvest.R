@@ -31,7 +31,8 @@ defineModule(sim, list(
   ),
   outputObjects = bindrows(
     createsOutput("rstCurrentHarvest",  "SpatRaster", "Harvest disturbance raster (consumed by Biomass_core)"),
-    createsOutput("cohortData",         "data.table", "Modified in-place: harvested cohorts zeroed"),
+    createsOutput("cohortData",         "data.table", "Cohorts of pixel groups left with no cells after harvest are removed"),
+    createsOutput("pixelGroupMap",      "SpatRaster", "Harvested cells set to 0 (forest with no cohorts)"),
     createsOutput("ws3HarvestSchedule", "data.table", "WS3 harvest schedule for reporting")
   )
 ))
@@ -94,17 +95,36 @@ del _fm, _ws3fm_init
 
       sim <- scheduleEvent(sim, start(sim), "biomass_ws3Harvest", "ws3Plan",
                            eventPriority = 2)   # after updateCurves (priority 1)
+      sim <- scheduleEvent(sim, start(sim), "biomass_ws3Harvest", "harvest",
+                           eventPriority = 2.5) # after ws3Plan, before Biomass_core growth
     },
     ws3Plan = {
       sim <- .ws3Plan(sim)
       sim <- scheduleEvent(sim, time(sim) + params(sim)$.globals$ws3PeriodLength,
                            "biomass_ws3Harvest", "ws3Plan", eventPriority = 2)
+    },
+    harvest = {
+      ## each year, the cut ws3Plan allocated to that year
+      res <- applyHarvestYear(time(sim), file.path(outputPath(sim), "harvest"),
+                              sim$cohortData, sim$pixelGroupMap)
+      if (!is.null(res)) {
+        sim$cohortData        <- res$cohortData
+        sim$pixelGroupMap     <- res$pixelGroupMap
+        sim$rstCurrentHarvest <- res$harvestRast
+      }
+      sim <- scheduleEvent(sim, time(sim) + 1, "biomass_ws3Harvest", "harvest", eventPriority = 2.5)
     }
   )
   invisible(sim)
 }
 
 .ws3Plan <- function(sim) {
+  # Clear this period's clearcut rasters first, so a failed solve leaves no stale ones from an
+  # earlier run for the harvest event to apply
+  harvestPath <- file.path(outputPath(sim), "harvest")
+  unlink(file.path(harvestPath, sprintf("clearcut_%d.tif",
+                                        time(sim) + seq_len(params(sim)$.globals$ws3PeriodLength) - 1)))
+
   ws3 <- reticulate::import("ws3")
   fm  <- sim$.ws3fm
 
@@ -333,18 +353,6 @@ _sched_df = _pd.DataFrame(
 ")
   sim$ws3HarvestSchedule <- data.table::as.data.table(reticulate::py_eval("_sched_df"))
 
-  # ── 8. Apply harvest to cohortData year by year ─────────────────────────────
-  period <- seq(time(sim), time(sim) + params(sim)$.globals$ws3PeriodLength - 1)
-  for (yr in period) {
-    tifPath <- file.path(outDir, sprintf("clearcut_%d.tif", yr))
-    if (!file.exists(tifPath)) {
-      message("biomass_ws3Harvest: no clearcut GeoTIFF for year ", yr, " — skipping")
-      next
-    }
-    hrast            <- terra::rast(tifPath)
-    sim$cohortData   <- applyHarvestAction("clearcut", hrast,
-                                            sim$cohortData, sim$pixelGroupMap)
-    sim$rstCurrentHarvest <- hrast
-  }
+  # The harvest event applies the clearcut rasters, one year at a time
   sim
 }

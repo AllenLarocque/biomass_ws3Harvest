@@ -1,7 +1,7 @@
 # applyHarvestAction(): dispatch harvest action by action code (clearcut now, extensible)
 
 # Action dispatch table — add new actions here (e.g., "partial_cut")
-# Each handler signature: function(harvestRast, cohortData, pixelGroupMap) -> cohortData
+# Each handler signature: function(harvestRast, cohortData, pixelGroupMap) -> list(cohortData, pixelGroupMap)
 .ACTION_REGISTRY <- list(
   clearcut = function(harvestRast, cohortData, pixelGroupMap) {
     applyClearcut(harvestRast, cohortData, pixelGroupMap)
@@ -14,7 +14,7 @@ applyHarvestAction <- function(actionCode, harvestRast, cohortData, pixelGroupMa
   if (is.null(handler)) {
     warning("applyHarvestAction: unknown action '", actionCode,
             "' — skipping. Register handler in actionDispatch.R")
-    return(cohortData)
+    return(list(cohortData = cohortData, pixelGroupMap = pixelGroupMap))
   }
   handler(harvestRast, cohortData, pixelGroupMap)
 }
