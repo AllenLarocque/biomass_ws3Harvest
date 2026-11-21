@@ -31,7 +31,8 @@ defineModule(sim, list(
   ),
   outputObjects = bindrows(
     createsOutput("rstCurrentHarvest",  "SpatRaster", "Harvest disturbance raster (consumed by Biomass_core)"),
-    createsOutput("cohortData",         "data.table", "Modified in-place: harvested cohorts zeroed"),
+    createsOutput("cohortData",         "data.table", "Cohorts of pixel groups left with no cells after harvest are removed"),
+    createsOutput("pixelGroupMap",      "SpatRaster", "Harvested cells set to 0 (forest with no cohorts)"),
     createsOutput("ws3HarvestSchedule", "data.table", "WS3 harvest schedule for reporting")
   )
 ))
@@ -40,8 +41,8 @@ doEvent.biomass_ws3Harvest <- function(sim, eventTime, eventType) {
   switch(eventType,
     init = {
       # source helper files (harvestBridge before actionDispatch — applyClearcut needed in registry)
-      lapply(c("inventoryBridge.R", "harvestBridge.R", "actionDispatch.R"), function(f)
-        source(file.path(modulePath(sim), currentModule(sim), "R", f)))
+      lapply(c("inventoryBridge.R", "harvestBridge.R", "actionDispatch.R", "spatialBridge.R"),
+             function(f) source(file.path(modulePath(sim), currentModule(sim), "R", f)))
 
       # also source siteQuality from biomass_yieldTablesWS3
       source(file.path(modulePath(sim), "biomass_yieldTablesWS3", "R", "siteQuality.R"))
@@ -92,47 +93,45 @@ _fm.add_null_action()   # registers 'null' grow-in-place action
 del _fm, _ws3fm_init
 ")
 
-      # ── ForestRaster (spatial harvest allocator) ─────────────────────────────
-      # TODO: initialise ws3$spatial$ForestRaster here once the rasterized
-      # inventory GeoTIFF (3-layer: theme hash, age, block ID) is available.
-      #
-      # ForestRaster requires:
-      #   hdt_map      — dict mapping raster hash values → dev type tuples
-      #   hdt_func     — hash function encoding dev type tuples → integer
-      #   src_path     — path to 3-layer input inventory GeoTIFF
-      #   snk_path     — output directory for disturbance GeoTIFFs
-      #   acode_map    — dict of disturbance codes → output filename prefixes
-      #   forestmodel  — the ForestModel instance (sim$.ws3fm)
-      #   base_year, period_length, horizon
-      #
-      # See: https://github.com/UBC-FRESH/ws3/blob/main/ws3/spatial.py
-      #
-      # Until ForestRaster is wired up, ws3Plan will skip spatial allocation
-      # and log a warning per period.
-      sim$.ws3fr <- NULL
-
       sim <- scheduleEvent(sim, start(sim), "biomass_ws3Harvest", "ws3Plan",
                            eventPriority = 2)   # after updateCurves (priority 1)
+      sim <- scheduleEvent(sim, start(sim), "biomass_ws3Harvest", "harvest",
+                           eventPriority = 2.5) # after ws3Plan, before Biomass_core growth
     },
     ws3Plan = {
       sim <- .ws3Plan(sim)
       sim <- scheduleEvent(sim, time(sim) + params(sim)$.globals$ws3PeriodLength,
                            "biomass_ws3Harvest", "ws3Plan", eventPriority = 2)
+    },
+    harvest = {
+      ## each year, the cut ws3Plan allocated to that year
+      res <- applyHarvestYear(time(sim), file.path(outputPath(sim), "harvest"),
+                              sim$cohortData, sim$pixelGroupMap)
+      if (!is.null(res)) {
+        sim$cohortData        <- res$cohortData
+        sim$pixelGroupMap     <- res$pixelGroupMap
+        sim$rstCurrentHarvest <- res$harvestRast
+      } else {
+        sim$rstCurrentHarvest <- NULL   # no cut this year: do not leave last year's showing
+      }
+      sim <- scheduleEvent(sim, time(sim) + 1, "biomass_ws3Harvest", "harvest", eventPriority = 2.5)
     }
   )
   invisible(sim)
 }
 
 .ws3Plan <- function(sim) {
+  # Clear this period's clearcut rasters first, so a failed solve leaves no stale ones from an
+  # earlier run for the harvest event to apply
+  harvestPath <- file.path(outputPath(sim), "harvest")
+  unlink(file.path(harvestPath, sprintf("clearcut_%d.tif",
+                                        time(sim) + seq_len(params(sim)$.globals$ws3PeriodLength) - 1)))
+
   ws3 <- reticulate::import("ws3")
   fm  <- sim$.ws3fm
 
   # ── 1. Derive pixel areas ───────────────────────────────────────────────────
-  cellArea_ha <- terra::cellSize(sim$pixelGroupMap, unit = "ha")
-  pgVals      <- terra::values(sim$pixelGroupMap, mat = FALSE)
-  areaVals    <- terra::values(cellArea_ha, mat = FALSE)
-  pixelArea   <- data.table::data.table(pixelGroup = pgVals, area_ha = areaVals)
-  pixelArea   <- pixelArea[!is.na(pixelGroup), .(area_ha = sum(area_ha)), by = pixelGroup]
+  pixelArea <- ws3PixelArea(sim$pixelGroupMap)
 
   # ── 2. Bin site quality (use max maxANPP across ecoregions per species as ceiling) ──
   speciesMaxANPP <- sim$speciesEcoregion[, .(globalMaxANPP = max(maxANPP, na.rm = TRUE)),
@@ -145,6 +144,12 @@ del _fm, _ws3fm_init
     periodLength  = params(sim)$.globals$ws3PeriodLength,
     minHarvestAge = P(sim)$ws3MinHarvestAge
   )
+
+  if (sum(inv$area_ha) <= 0) {
+    warning("biomass_ws3Harvest: no forest to plan at year ", time(sim), " — no harvest this period")
+    sim$ws3HarvestSchedule <- NULL
+    return(sim)
+  }
 
   # ── 4. Load inventory and yield curves into WS3 ─────────────────────────────
   core      <- reticulate::import("ws3.core")
@@ -166,10 +171,6 @@ def _ws3_ensure_dtype(fm, dtkey):
 ")
   ensure_dtype <- reticulate::py_eval("_ws3_ensure_dtype")
 
-  currentPeriod <- as.integer(
-    (time(sim) - P(sim)$ws3BaseYear) / params(sim)$.globals$ws3PeriodLength
-  )
-
   for (key in names(sim$ws3YieldCurves)) {
     curve_data <- sim$ws3YieldCurves[[key]]
     dtkey      <- to_dtkey(key)   # Python tuple e.g. ('Pice_mar', 'med', 'ECO_1')
@@ -186,13 +187,9 @@ def _ws3_ensure_dtype(fm, dtkey):
         xmax          = fm$max_age)
       fm$dt(dtkey)$add_ycomp("a", "vol", ws3_curve)
     }
-
-    # Load current-period inventory areas (always, even for existing dtypes)
-    invRows <- inv[devTypeKey == key]
-    for (i in seq_len(nrow(invRows))) {
-      fm$dt(dtkey)$area(currentPeriod, invRows$age_class[i], invRows$area_ha[i])
-    }
   }
+
+  loadWs3Inventory(fm, inv)
 
   # Register 'vol' in fm$ynames so compile_product() can substitute it.
   # add_ycomp() on a dtype does NOT update fm$ynames; compile_product() checks
@@ -236,17 +233,9 @@ def _lndr_cflw(fm, path, expr='vol', mask=None):
   z_fn    <- reticulate::py_eval("_partial(_lndr_z,    expr='vol')")
   cflw_fn <- reticulate::py_eval("_partial(_lndr_cflw, expr='vol')")
 
-  # Even-flow constraint: allow up to 5% deviation between adjacent periods.
-  # Built in Python to ensure integer period keys and tuple (epsilon_dict, lag)
-  # format that ws3.forest.ForestModel.add_problem() expects.
-  py_main <- reticulate::import_main()
-  py_main$`_ws3_horizon` <- as.integer(P(sim)$ws3Horizon)
-  reticulate::py_run_string("
-_cflw_e  = {'cflw_vol': ({t: 0.05 for t in range(1, _ws3_horizon + 1)}, 1)}
-_acodes  = ['null', 'clearcut']
-")
-  cflw_e_py <- reticulate::py_eval("_cflw_e")
-  acodes_py <- reticulate::py_eval("_acodes")
+  # Even-flow constraint: allow up to 5% deviation from the period-1 harvest.
+  cflw_e_py <- ws3FlowConstraints("cflw_vol", P(sim)$ws3Horizon, 0.05)
+  acodes_py <- reticulate::r_to_py(list("null", "clearcut"))
   ws3opt    <- reticulate::import("ws3.opt")
 
   ws3LogPath <- file.path(outputPath(sim), "ws3_python_error.log")
@@ -292,38 +281,84 @@ with open('%s', 'w') as _f:
   if (p$status() != "optimal") {
     warning("biomass_ws3Harvest: WS3 solve status '", p$status(),
             "' at year ", time(sim), " — skipping harvest this period")
+    sim$ws3HarvestSchedule <- NULL   # so the previous period's schedule is not reported again
     return(sim)
   }
 
-  # ── 6. Allocate spatial harvest schedule ────────────────────────────────────
+  applyWs3Solution(fm, p)
+
+  # ── 6. Build inventory raster and allocate spatial harvest schedule ──────────
+  # ForestRaster is re-initialised each period from current forest state so the
+  # inventory always reflects Biomass_core's growth model rather than ws3 age tracking.
+  # horizon=1 allocates the current period only; allocate_schedule writes one
+  # clearcut_{year}.tif per annual sub-step consumed by step 8 below.
   outDir <- file.path(outputPath(sim), "harvest")
   dir.create(outDir, showWarnings = FALSE, recursive = TRUE)
 
-  # ForestRaster.allocate_schedule writes one GeoTIFF per action per year.
-  # ForestRaster requires a pre-built rasterized inventory and hdt_map/hdt_func
-  # (see TODO in init block). Until those are wired up, spatial allocation is skipped.
-  if (!is.null(sim$.ws3fr)) {
-    sim$.ws3fr$allocate_schedule(outDir)
-  } else {
-    warning("biomass_ws3Harvest: ForestRaster not initialised — spatial harvest allocation ",
-            "skipped for period at year ", time(sim), ". See TODO in init block.")
-  }
+  invRast <- buildInventoryRaster(
+    cohortData    = cd,
+    pixelGroupMap = sim$pixelGroupMap,
+    period_length = as.integer(params(sim)$.globals$ws3PeriodLength),
+    base_year     = as.integer(time(sim)),
+    out_dir       = outDir
+  )
+
+  py_main <- reticulate::import_main()
+  py_main$`_ws3fm`             <- fm
+  py_main$`_ws3_hdt_table`     <- reticulate::r_to_py(invRast$hdt_table)
+  py_main$`_ws3_inv_path`      <- as.character(invRast$path)
+  py_main$`_ws3_snk_path`      <- as.character(outDir)
+  py_main$`_ws3_base_year`     <- as.integer(time(sim))
+  py_main$`_ws3_period_length` <- as.integer(params(sim)$.globals$ws3PeriodLength)
+
+  reticulate::py_run_string("
+import ws3.common as _ws3c, ws3.spatial as _ws3s
+# Workaround for ws3 (<= 1.0.5, main 2026-08): a transition with no age condition is stored
+# under age -1, and ForestModel.apply_action() falls back to it, but
+# ForestRaster.allocate_schedule() looks transitions up by exact age, with no fallback, and
+# raises KeyError: ('null', 9). Copy each age -1 transition to every age that has none: the
+# same target, so the aspatial model is unchanged. Remove once ws3 falls back to -1 there.
+for _dt in _ws3fm.dtypes.values():
+    for (_acode, _age), _target in list(_dt.transitions.items()):
+        if _age == -1:
+            for _a in range(0, _ws3fm.max_age + 1):
+                _dt.transitions.setdefault((_acode, _a), _target)
+_hdt_map = {
+    int(row['hash_val']): (row['speciesCode'], row['site_quality'], row['ecoregionGroup'])
+    for _, row in _ws3_hdt_table.iterrows()
+}
+_fr = _ws3s.ForestRaster(
+    hdt_map          = _hdt_map,
+    hdt_func         = _ws3c.hash_dt,
+    src_path         = _ws3_inv_path,
+    snk_path         = _ws3_snk_path,
+    acode_map        = {'clearcut': 'clearcut', 'null': 'null'},  # every applied action needs a sink
+    forestmodel      = _ws3fm,
+    base_year        = _ws3_base_year,
+    period_length    = _ws3_period_length,
+    horizon          = 1,
+    piggyback_acodes = {}
+)
+")
+  ws3ExactAgeAllocation(reticulate::py_eval("_fr", convert = FALSE))
+  reticulate::py_run_string("_fr.allocate_schedule(mask=('?', '?', '?'), sda_mode='randblk', nthresh=1)")
 
   # ── 7. Record schedule for reporting ────────────────────────────────────────
-  sim$ws3HarvestSchedule <- data.table::as.data.table(p$solution())
+  # compile_product(t, 'vol', acode='clearcut') reads fm.applied_actions[t]
+  # (populated by p$solve()) and returns sum(vol * area) across all dev types
+  # and ages — giving us the true per-period harvested volume.
+  py_main <- reticulate::import_main()
+  py_main$`_ws3fm_sched` <- fm
+  reticulate::py_run_string("
+import pandas as _pd
+_sched_df = _pd.DataFrame(
+    [(int(_t), float(_ws3fm_sched.compile_product(_t, 'vol', acode='clearcut') or 0.0))
+     for _t in _ws3fm_sched.periods],
+    columns=['period', 'vol_harvested']
+)
+")
+  sim$ws3HarvestSchedule <- data.table::as.data.table(reticulate::py_eval("_sched_df"))
 
-  # ── 8. Apply harvest to cohortData year by year ─────────────────────────────
-  period <- seq(time(sim), time(sim) + params(sim)$.globals$ws3PeriodLength - 1)
-  for (yr in period) {
-    tifPath <- file.path(outDir, sprintf("clearcut_%d.tif", yr))
-    if (!file.exists(tifPath)) {
-      message("biomass_ws3Harvest: no clearcut GeoTIFF for year ", yr, " — skipping")
-      next
-    }
-    hrast            <- terra::rast(tifPath)
-    sim$cohortData   <- applyHarvestAction("clearcut", hrast,
-                                            sim$cohortData, sim$pixelGroupMap)
-    sim$rstCurrentHarvest <- hrast
-  }
+  # The harvest event applies the clearcut rasters, one year at a time
   sim
 }
