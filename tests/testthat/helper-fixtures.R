@@ -19,10 +19,16 @@ source("../../../biomass_yieldTablesWS3/R/curveCache.R")
 source("../../R/inventoryBridge.R")
 source("../../R/harvestBridge.R")
 source("../../R/actionDispatch.R")
+source("../../R/spatialBridge.R")
 
 # TESTTHAT_WD — absolute path to the project root (4 levels up from tests/testthat/).
 if (nchar(Sys.getenv("TESTTHAT_WD")) == 0L)
   Sys.setenv(TESTTHAT_WD = normalizePath(file.path(getwd(), "..", "..", "..", "..")))
+
+skip_if_no_ws3 <- function() {
+  if (!reticulate::py_module_available("ws3"))
+    skip("ws3 Python package not available")
+}
 
 # ── Mock data factories ──────────────────────────────────────────────────────
 
